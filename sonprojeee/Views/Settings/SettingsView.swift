@@ -32,6 +32,7 @@ struct SettingsView: View {
         case paths = "Yollar"
         case appearance = "Görünüm"
         case notifications = "Bildirimler"
+        case backup = "Yedekleme"
         case advanced = "Gelişmiş"
         case about = "Hakkında"
         
@@ -41,6 +42,7 @@ struct SettingsView: View {
             case .paths: return "folder.badge.gearshape"
             case .appearance: return "paintbrush"
             case .notifications: return "bell"
+            case .backup: return "externaldrive.badge.timemachine"
             case .advanced: return "wrench.and.screwdriver"
             case .about: return "info.circle"
             }
@@ -287,6 +289,7 @@ struct SettingsView: View {
         case .paths: return "Dosya yolları ve dizin ayarları"
         case .appearance: return "Görünüm ve tema tercihleri"
         case .notifications: return "Bildirim ayarları ve tercihler"
+        case .backup: return "Yedekleme ve geri yükleme işlemleri"
         case .advanced: return "Gelişmiş özellikler ve araçlar"
         case .about: return "Uygulama hakkında bilgiler"
         }
@@ -299,6 +302,7 @@ struct SettingsView: View {
         case .paths: pathsTabContent
         case .appearance: appearanceTabContent
         case .notifications: notificationsTabContent
+        case .backup: BackupRestoreView().environmentObject(manager)
         case .advanced: advancedTabContent
         case .about: aboutTabContent
         }
