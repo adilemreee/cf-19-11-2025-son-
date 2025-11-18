@@ -7,6 +7,7 @@ struct SettingsView: View {
     @AppStorage("darkModeEnabled") private var darkModeEnabled = false
     @AppStorage("notificationsEnabled") private var notificationsEnabled = true
     @AppStorage("autoStartTunnels") private var autoStartTunnels = false
+    @AppStorage("autoStartMamp") private var autoStartMamp = false
     @AppStorage("minimizeToTray") private var minimizeToTray = true
     @AppStorage("showStatusInMenuBar") private var showStatusInMenuBar = true
     @AppStorage("accentColor") private var accentColorName = "blue"
@@ -353,6 +354,8 @@ struct SettingsView: View {
             modernCard("Sistem Davranışı", icon: "gearshape") {
                 VStack(spacing: 16) {
                     modernToggle("Otomatik Tünel Başlatma", isOn: $autoStartTunnels, description: "Uygulama açıldığında tünelleri otomatik başlat")
+                    
+                    modernToggle("Otomatik MAMP Başlatma", isOn: $autoStartMamp, description: "Uygulama açıldığında MAMP'ı otomatik başlat ve kapanırken durdur")
                     
                     modernToggle("Sistem Tepsisine Küçült", isOn: $minimizeToTray, description: "Pencere kapatıldığında uygulamayı gizle")
                     
@@ -1192,8 +1195,6 @@ struct SettingsView: View {
     }
     
     private func openInFinder(_ path: String) {
-        let url = URL(fileURLWithPath: path)
-        
         // Sandbox güvenli açma
         let expandedPath = (path as NSString).expandingTildeInPath
         let expandedURL = URL(fileURLWithPath: expandedPath)

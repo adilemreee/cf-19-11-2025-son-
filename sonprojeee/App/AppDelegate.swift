@@ -80,6 +80,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Check executable status on launch
         tunnelManager.checkCloudflaredExecutable()
+        
+        // 7. Auto-start MAMP if enabled
+        if UserDefaults.standard.bool(forKey: "autoStartMamp") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.startMampServersAction()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -88,6 +95,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         tunnelManager?.stopMonitoringCloudflaredDirectory()
         // Stop all tunnels synchronously during shutdown
         tunnelManager?.stopAllTunnels(synchronous: true)
+        
+        // Stop MAMP if auto-start is enabled
+        if UserDefaults.standard.bool(forKey: "autoStartMamp") {
+            stopMampServersAction()
+            Thread.sleep(forTimeInterval: 1.0) // Wait for MAMP to stop
+        }
+        
         print("Kapanış işlemleri tamamlandı.")
         Thread.sleep(forTimeInterval: 0.2) // Brief pause for async ops
     }
@@ -532,17 +546,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
      // --- [NEW] MAMP Control @objc Actions ---
      @objc func startMampServersAction() {
-         executeMampCommand(
-             scriptName: mampStartScript,
-             successMessage: "MAMP sunucuları (Apache & MySQL) için başlatma komutu gönderildi.",
-             failureMessage: "MAMP sunucuları başlatılırken hata oluştu."
-         )
+         // Önce çalışan MySQL process'lerini kontrol et ve temizle
+         cleanupDuplicateMySQL()
+         
+         // Kısa bir bekleme sonrası başlat
+         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+             self?.executeMampCommand(
+                 scriptName: self?.mampStartScript ?? "start.sh",
+                 successMessage: "MAMP sunucuları (Apache & MySQL) başlatıldı.",
+                 failureMessage: "MAMP sunucuları başlatılırken hata oluştu."
+             )
+         }
      }
 
      @objc func stopMampServersAction() {
          executeMampCommand(
              scriptName: mampStopScript,
-             successMessage: "MAMP sunucuları (Apache & MySQL) için durdurma komutu gönderildi.",
+             successMessage: "MAMP sunucuları (Apache & MySQL) durduruldu.",
              failureMessage: "MAMP sunucuları durdurulurken hata oluştu."
          )
      }
@@ -713,6 +733,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     ///   - scriptName: Çalıştırılacak betik adı (örn: "start.sh").
     ///   - successMessage: Başarılı olursa gösterilecek bildirim mesajı.
     ///   - failureMessage: Başarısız olursa gösterilecek hata başlığı.
+    // Helper: Clean up duplicate MySQL processes before starting
+    private func cleanupDuplicateMySQL() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            process.arguments = ["-9", "mysqld", "mysqld_safe"]
+            
+            do {
+                try process.run()
+                process.waitUntilExit()
+                print("🧹 Duplicate MySQL processes cleaned up")
+                
+                // Clean up stale files
+                let tmpPath = "/Applications/MAMP/tmp/mysql"
+                try? FileManager.default.removeItem(atPath: "\(tmpPath)/mysql.pid")
+                try? FileManager.default.removeItem(atPath: "\(tmpPath)/mysql.sock")
+                try? FileManager.default.removeItem(atPath: "\(tmpPath)/mysql.sock.lock")
+                
+                Thread.sleep(forTimeInterval: 1.0)
+            } catch {
+                print("⚠️ Failed to cleanup MySQL: \(error)")
+            }
+        }
+    }
+    
     private func executeMampCommand(scriptName: String, successMessage: String, failureMessage: String) {
         let scriptPath = "\(mampBinPath)/\(scriptName)"
 

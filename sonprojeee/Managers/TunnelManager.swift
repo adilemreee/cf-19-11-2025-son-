@@ -367,8 +367,35 @@ class TunnelManager: ObservableObject {
     }
 
     deinit {
+        // Clean up timers
         statusCheckTimer?.invalidate()
+        statusCheckTimer = nil
+        monitorDebounceTimer?.invalidate()
+        monitorDebounceTimer = nil
+        
+        // Stop monitoring
         stopMonitoringCloudflaredDirectory()
+        
+        // Cancel all subscriptions
+        cancellables.forEach { $0.cancel() }
+        cancellables.removeAll()
+        
+        // Terminate all running processes
+        runningManagedProcesses.values.forEach { process in
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+        runningManagedProcesses.removeAll()
+        
+        runningQuickProcesses.values.forEach { process in
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+        runningQuickProcesses.removeAll()
+        
+        print("✅ TunnelManager cleanup tamamlandı")
     }
     
     private func resolvedCloudflaredExecutableURL() -> URL {
@@ -448,12 +475,20 @@ class TunnelManager: ObservableObject {
 
     // MARK: - Timer Setup
     func setupStatusCheckTimer() {
-        statusCheckTimer?.invalidate()
-        statusCheckTimer = Timer.scheduledTimer(withTimeInterval: checkInterval, repeats: true) { [weak self] _ in
-             self?.checkAllManagedTunnelStatuses()
+        // Main thread'de çalıştığından emin ol
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            self.statusCheckTimer?.invalidate()
+            self.statusCheckTimer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
+                self?.checkAllManagedTunnelStatuses()
+            }
+            
+            if let timer = self.statusCheckTimer {
+                RunLoop.current.add(timer, forMode: .common)
+                print("Yönetilen tünel durum kontrol timer'ı \(self.checkInterval) saniye aralıkla kuruldu.")
+            }
         }
-        RunLoop.current.add(statusCheckTimer!, forMode: .common)
-        print("Yönetilen tünel durum kontrol timer'ı \(checkInterval) saniye aralıkla kuruldu.")
     }
 
     // MARK: - Tunnel Discovery (Managed Tunnels from Config Files)
@@ -566,31 +601,43 @@ class TunnelManager: ObservableObject {
 
     func startManagedTunnel(_ tunnel: TunnelInfo) {
         guard tunnel.isManaged, let configPath = tunnel.configPath else { return }
-        guard let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
+        
+        // Thread-safe check - must be on main thread
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard let index = self.tunnels.firstIndex(where: { $0.id == tunnel.id }) else { return }
 
-        guard runningManagedProcesses[configPath] == nil, tunnels[index].status != .running, tunnels[index].status != .starting else {
-             print("ℹ️ \(tunnel.name) zaten çalışıyor veya başlatılıyor.")
-             return
+            // Race condition check - verify tunnel isn't already starting/running
+            guard self.runningManagedProcesses[configPath] == nil, 
+                  self.tunnels[index].status != .running, 
+                  self.tunnels[index].status != .starting else {
+                print("ℹ️ \(tunnel.name) zaten çalışıyor veya başlatılıyor.")
+                return
+            }
+            
+            self.performStartManagedTunnel(tunnel, at: index, configPath: configPath)
         }
+    }
+    
+    private func performStartManagedTunnel(_ tunnel: TunnelInfo, at index: Int, configPath: String) {
         let executablePath = resolvedCloudflaredExecutablePath()
         guard FileManager.default.fileExists(atPath: executablePath) else {
-             DispatchQueue.main.async {
-                 if self.tunnels.indices.contains(index) {
-                     self.tunnels[index].status = .error
-                     self.tunnels[index].lastError = "cloudflared yürütülebilir dosyası bulunamadı: \(executablePath)"
-                 }
-             }
-            postUserNotification(identifier:"start_fail_noexec_\(tunnel.id)", title: "Başlatma Hatası: \(tunnel.name)", body: "cloudflared yürütülebilir dosyası bulunamadı.")
+            if self.tunnels.indices.contains(index) {
+                self.tunnels[index].status = .error
+                self.tunnels[index].lastError = "cloudflared yürütülebilir dosyası bulunamadı: \(executablePath)"
+            }
+            ErrorHandler.shared.handle(
+                TunnelError.cloudflaredNotFound(path: executablePath),
+                context: "Tünel Başlatma"
+            )
             return
         }
 
         print("▶️ Yönetilen tünel \(tunnel.name) başlatılıyor...")
-        DispatchQueue.main.async {
-            if self.tunnels.indices.contains(index) {
-                self.tunnels[index].status = .starting
-                self.tunnels[index].lastError = nil
-                self.tunnels[index].processIdentifier = nil
-            }
+        if self.tunnels.indices.contains(index) {
+            self.tunnels[index].status = .starting
+            self.tunnels[index].lastError = nil
+            self.tunnels[index].processIdentifier = nil
         }
 
         let process = Process()
@@ -854,6 +901,21 @@ class TunnelManager: ObservableObject {
     func createConfigFile(configName: String, tunnelUUID: String, credentialsPath: String, hostname: String, port: String, documentRoot: String?, completion: @escaping (Result<String, Error>) -> Void) {
          print("📄 Yapılandırma dosyası oluşturuluyor: \(configName).yml")
             let fileManager = FileManager.default
+            
+            // Port conflict check
+            if let portInt = Int(port) {
+                let portCheckResult = PortChecker.shared.checkPort(portInt)
+                if case .failure(let error) = portCheckResult {
+                    print("⚠️ Port \(port) zaten kullanımda")
+                    // Warn but continue - user might want to use it anyway
+                    ErrorHandler.shared.handle(error, context: "Port Kontrolü", showAlert: false)
+                    postUserNotification(
+                        identifier: "port_conflict_\(port)",
+                        title: "Port Uyası",
+                        body: error.localizedDescription + "\n\nDevam ediliyor, ancak tünel bağlanmayabilir."
+                    )
+                }
+            }
 
             // Ensure ~/.cloudflared directory exists
             var isDir: ObjCBool = false
@@ -904,6 +966,58 @@ class TunnelManager: ObservableObject {
 
             // Sadece documentRoot varsa MAMP güncellemelerini yap
             if let docRoot = documentRoot, !docRoot.isEmpty {
+                // Check MAMP file permissions first
+                let permissionCheck = MAMPPermissionHandler.shared.checkMAMPPermissions(
+                    vhostPath: mampVHostConfPath,
+                    httpdPath: mampHttpdConfPath
+                )
+                
+                if !permissionCheck.canWrite {
+                    print("⚠️ MAMP dosya izinleri yetersiz")
+                    for error in permissionCheck.errors {
+                        ErrorHandler.shared.handle(error, context: "MAMP İzin Kontrolü", showAlert: false)
+                    }
+                    
+                    // Ask user if they want to fix permissions
+                    DispatchQueue.main.async {
+                        let alert = NSAlert()
+                        alert.messageText = "MAMP Dosya İzinleri"
+                        alert.informativeText = "MAMP yapılandırma dosyalarına yazma izni gerekiyor. Admin şifrenizle düzeltmek ister misiniz?"
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "İzinleri Düzelt")
+                        alert.addButton(withTitle: "Atla")
+                        alert.addButton(withTitle: "Manuel Yapılandırma")
+                        
+                        let response = alert.runModal()
+                        
+                        if response == .alertFirstButtonReturn {
+                            // Try to fix permissions
+                            let files = [self.mampVHostConfPath, self.mampHttpdConfPath]
+                            if MAMPPermissionHandler.shared.requestAdminPrivileges(for: files) {
+                                print("✅ MAMP dosya izinleri düzeltildi")
+                                self.postUserNotification(
+                                    identifier: "mamp_permissions_fixed",
+                                    title: "MAMP İzinleri",
+                                    body: "İzinler başarıyla düzeltildi"
+                                )
+                            } else {
+                                print("❌ MAMP dosya izinleri düzeltilemedi")
+                                self.postUserNotification(
+                                    identifier: "mamp_permissions_failed",
+                                    title: "MAMP İzinleri",
+                                    body: "İzinler düzeltilemedi. Manuel yapılandırma gerekebilir."
+                                )
+                            }
+                        } else if response == .alertThirdButtonReturn {
+                            // Show manual configuration instructions
+                            MAMPPermissionHandler.shared.showManualConfigInstructions(
+                                config: yamlContent,
+                                filePath: targetPath
+                            )
+                        }
+                    }
+                }
+                
                 // 1. vHost Güncellemesi
                 mampUpdateGroup.enter()
                 updateMampVHost(serverName: hostname, documentRoot: docRoot, port: port) { result in
@@ -1009,7 +1123,8 @@ class TunnelManager: ObservableObject {
         let outputPipe = Pipe(); let errorPipe = Pipe()
         process.standardOutput = outputPipe; process.standardError = errorPipe
 
-        process.terminationHandler = { terminatedProcess in
+        process.terminationHandler = { [weak self] terminatedProcess in
+            guard let self = self else { return }
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
             let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             let outputString = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1275,7 +1390,9 @@ class TunnelManager: ObservableObject {
         let outputPipe = Pipe(); let errorPipe = Pipe()
         process.standardOutput = outputPipe; process.standardError = errorPipe
 
-        process.terminationHandler = { terminatedProcess in
+        process.terminationHandler = { [weak self] terminatedProcess in
+             guard let self = self else { return }
+             
              let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
              let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
              let outputString = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
