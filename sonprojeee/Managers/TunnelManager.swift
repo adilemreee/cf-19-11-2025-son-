@@ -39,6 +39,7 @@ class TunnelManager: ObservableObject {
             if cloudflaredExecutablePath != oldValue {
                 UserDefaults.standard.set(cloudflaredExecutablePath, forKey: "cloudflaredPath")
                 print("Yeni cloudflared yolu ayarlandı: \(cloudflaredExecutablePath)")
+                invalidateCloudflaredBookmarkIfNeeded()
                 checkCloudflaredExecutable() // Validate the new path
             }
         }
@@ -108,10 +109,74 @@ class TunnelManager: ObservableObject {
         }
     }
 
+    // Check if cloudflared is bundled within the app and copy it to Application Support if needed
+    private static func setupBundledCloudflared() -> String? {
+        let fileManager = FileManager.default
+        
+        // Check for cloudflared in bundle's Resources
+        guard let bundledPath = Bundle.main.path(forResource: "cloudflared", ofType: nil) else {
+            print("ℹ️ Bundle içinde cloudflared bulunamadı")
+            return nil
+        }
+        
+        print("✅ Bundle'da cloudflared bulundu: \(bundledPath)")
+        
+        // Get Application Support directory
+        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            print("⚠️ Application Support dizini bulunamadı")
+            return nil
+        }
+        
+        let appSupportPath = appSupport.appendingPathComponent("CloudflaredManager", isDirectory: true)
+        let targetPath = appSupportPath.appendingPathComponent("cloudflared")
+        
+        // Create directory if needed
+        try? fileManager.createDirectory(at: appSupportPath, withIntermediateDirectories: true)
+        
+        // Check if already exists and is executable
+        if fileManager.fileExists(atPath: targetPath.path) {
+            if fileManager.isExecutableFile(atPath: targetPath.path) {
+                print("✅ cloudflared zaten Application Support'ta mevcut: \(targetPath.path)")
+                return targetPath.path
+            } else {
+                // Remove if not executable
+                try? fileManager.removeItem(at: targetPath)
+            }
+        }
+        
+        // Copy from bundle to Application Support
+        do {
+            try fileManager.copyItem(atPath: bundledPath, toPath: targetPath.path)
+            print("✅ cloudflared Application Support'a kopyalandı: \(targetPath.path)")
+            
+            // Set executable permissions
+            let attributes = [FileAttributeKey.posixPermissions: 0o755]
+            try fileManager.setAttributes(attributes, ofItemAtPath: targetPath.path)
+            print("✅ cloudflared için yürütme izinleri ayarlandı")
+            
+            return targetPath.path
+        } catch {
+            print("⚠️ cloudflared kopyalama hatası: \(error.localizedDescription)")
+            // If copy fails, try to use bundled path directly
+            if fileManager.isExecutableFile(atPath: bundledPath) {
+                print("ℹ️ Bundle içindeki cloudflared kullanılacak")
+                return bundledPath
+            }
+            return nil
+        }
+    }
+
     private static func resolveInitialCloudflaredPath() -> String {
         let defaults = UserDefaults.standard
         let fileManager = FileManager.default
 
+        // First priority: Try bundled cloudflared (for TestFlight/Release builds)
+        if let bundledPath = setupBundledCloudflared() {
+            print("✅ Bundle'daki cloudflared kullanılacak: \(bundledPath)")
+            return bundledPath
+        }
+
+        // Second priority: Check stored path
         if let stored = defaults.string(forKey: "cloudflaredPath")?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !stored.isEmpty {
@@ -121,6 +186,7 @@ class TunnelManager: ObservableObject {
             }
         }
 
+        // Third priority: Check system paths
         let detectedViaWhich = lookupExecutable(named: "cloudflared")
         let candidatePaths = [detectedViaWhich,
                               "/opt/homebrew/bin/cloudflared",
@@ -178,7 +244,36 @@ class TunnelManager: ObservableObject {
         statusCheckTimer?.invalidate()
         stopMonitoringCloudflaredDirectory()
     }
+    
+    private func resolvedCloudflaredExecutableURL() -> URL {
+        return URL(fileURLWithPath: cloudflaredExecutablePath)
+    }
+    
+    private func resolvedCloudflaredExecutablePath() -> String {
+        return resolvedCloudflaredExecutableURL().path
+    }
 
+    private func invalidateCloudflaredBookmarkIfNeeded() {
+        // No longer needed with bundled cloudflared approach
+    }
+
+    private func cloudflaredBookmark(_ bookmarkedURL: URL, matches standardizedPath: String) -> Bool {
+        let currentURL = URL(fileURLWithPath: standardizedPath)
+        do {
+            let bookmarkedValues = try bookmarkedURL.resourceValues(forKeys: [.fileResourceIdentifierKey])
+            let currentValues = try currentURL.resourceValues(forKeys: [.fileResourceIdentifierKey])
+            if let bookmarkedID = bookmarkedValues.fileResourceIdentifier as? NSData,
+               let currentID = currentValues.fileResourceIdentifier as? NSData {
+                return bookmarkedID.isEqual(currentID)
+            }
+        } catch {
+            print("⚠️ cloudflared dosya kimliği okunamadı: \(error.localizedDescription)")
+        }
+        let resolvedBookmark = bookmarkedURL.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedCurrent = currentURL.standardizedFileURL.resolvingSymlinksInPath()
+        return resolvedBookmark.path == resolvedCurrent.path
+    }
+    
     // Helper to send notification via NotificationCenter
     internal func postUserNotification(identifier: String, title: String, body: String?) {
         let userInfo: [String: Any] = [
@@ -191,11 +286,12 @@ class TunnelManager: ObservableObject {
     }
 
     func checkCloudflaredExecutable() {
-         if !FileManager.default.fileExists(atPath: cloudflaredExecutablePath) {
-             print("⚠️ UYARI: cloudflared şurada bulunamadı: \(cloudflaredExecutablePath)")
-             postUserNotification(identifier:"cloudflared_not_found", title: "Cloudflared Bulunamadı", body: "'\(cloudflaredExecutablePath)' konumunda bulunamadı. Lütfen Ayarlar'dan yolu düzeltin.")
-         }
-     }
+        let resolvedPath = resolvedCloudflaredExecutablePath()
+        if !FileManager.default.fileExists(atPath: resolvedPath) {
+            print("⚠️ UYARI: cloudflared şurada bulunamadı: \(resolvedPath)")
+            postUserNotification(identifier:"cloudflared_not_found", title: "Cloudflared Bulunamadı", body: "'\(resolvedPath)' konumunda bulunamadı. Lütfen Ayarlar'dan yolu düzeltin.")
+        }
+    }
 
     // MARK: - Timer Setup
     func setupStatusCheckTimer() {
@@ -298,7 +394,7 @@ class TunnelManager: ObservableObject {
 
     // MARK: - Tunnel Control (Start/Stop/Toggle - Managed Only)
     func toggleManagedTunnel(_ tunnel: TunnelInfo) {
-        guard tunnel.isManaged, let configPath = tunnel.configPath else {
+        guard tunnel.isManaged, tunnel.configPath != nil else {
             print("❌ Hata: Yalnızca yapılandırma dosyası olan yönetilen tüneller değiştirilebilir: \(tunnel.name)")
             return
         }
@@ -323,11 +419,12 @@ class TunnelManager: ObservableObject {
              print("ℹ️ \(tunnel.name) zaten çalışıyor veya başlatılıyor.")
              return
         }
-        guard FileManager.default.fileExists(atPath: cloudflaredExecutablePath) else {
+        let executablePath = resolvedCloudflaredExecutablePath()
+        guard FileManager.default.fileExists(atPath: executablePath) else {
              DispatchQueue.main.async {
                  if self.tunnels.indices.contains(index) {
                      self.tunnels[index].status = .error
-                     self.tunnels[index].lastError = "cloudflared yürütülebilir dosyası bulunamadı: \(self.cloudflaredExecutablePath)"
+                     self.tunnels[index].lastError = "cloudflared yürütülebilir dosyası bulunamadı: \(executablePath)"
                  }
              }
             postUserNotification(identifier:"start_fail_noexec_\(tunnel.id)", title: "Başlatma Hatası: \(tunnel.name)", body: "cloudflared yürütülebilir dosyası bulunamadı.")
@@ -344,7 +441,9 @@ class TunnelManager: ObservableObject {
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: cloudflaredExecutablePath)
+        process.executableURL = resolvedCloudflaredExecutableURL()
+        process.currentDirectoryURL = URL(fileURLWithPath: cloudflaredDirectoryPath)
+        process.environment = ProcessInfo.processInfo.environment
         let tunnelIdentifier = tunnel.uuidFromConfig ?? tunnel.name
         process.arguments = ["tunnel", "--config", configPath, "run", tunnelIdentifier]
 
@@ -528,8 +627,9 @@ class TunnelManager: ObservableObject {
 
     // MARK: - Tunnel Creation & Config
     func createTunnel(name: String, completion: @escaping (Result<(uuid: String, jsonPath: String), Error>) -> Void) {
-        guard FileManager.default.fileExists(atPath: cloudflaredExecutablePath) else {
-            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared yürütülebilir dosyası şurada bulunamadı: \(cloudflaredExecutablePath)"])))
+        let execPath = resolvedCloudflaredExecutablePath()
+        guard FileManager.default.fileExists(atPath: execPath) else {
+            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared yürütülebilir dosyası şurada bulunamadı: \(execPath)"])))
             return
         }
         if name.rangeOfCharacter(from: .whitespacesAndNewlines) != nil || name.isEmpty {
@@ -539,7 +639,9 @@ class TunnelManager: ObservableObject {
 
         print("🏗️ Yeni tünel oluşturuluyor: \(name)...")
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: cloudflaredExecutablePath)
+        process.executableURL = resolvedCloudflaredExecutableURL()
+        process.currentDirectoryURL = URL(fileURLWithPath: cloudflaredDirectoryPath)
+        process.environment = ProcessInfo.processInfo.environment
         process.arguments = ["tunnel", "create", name]
 
         let outputPipe = Pipe(); let errorPipe = Pipe()
@@ -715,8 +817,9 @@ class TunnelManager: ObservableObject {
 
     // MARK: - Tunnel Deletion (Revised - Removing --force temporarily)
     func deleteTunnel(tunnelInfo: TunnelInfo, completion: @escaping (Result<Void, Error>) -> Void) {
-        guard FileManager.default.fileExists(atPath: cloudflaredExecutablePath) else {
-            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared yürütülebilir dosyası bulunamadı."]))); return
+        let execPath = resolvedCloudflaredExecutablePath()
+        guard FileManager.default.fileExists(atPath: execPath) else {
+            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared yürütülebilir dosyası bulunamadı: \(execPath)"]))); return
         }
 
         // Silme için KESİNLİKLE UUID'yi tercih et
@@ -747,7 +850,7 @@ class TunnelManager: ObservableObject {
 
         // Adım 2: Silme komutunu çalıştır (--force OLMADAN)
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: cloudflaredExecutablePath)
+        process.executableURL = resolvedCloudflaredExecutableURL()
         // process.arguments = ["tunnel", "delete", identifierToDelete, "--force"] // ESKİ HALİ
         process.arguments = ["tunnel", "delete", identifierToDelete] // YENİ HALİ (--force YOK)
         let outputPipe = Pipe(); let errorPipe = Pipe()
@@ -884,8 +987,9 @@ class TunnelManager: ObservableObject {
 
     // MARK: - DNS Routing
     func routeDns(tunnelInfo: TunnelInfo, hostname: String, completion: @escaping (Result<String, Error>) -> Void) {
-        guard FileManager.default.fileExists(atPath: cloudflaredExecutablePath) else {
-            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared bulunamadı."]))); return
+        let execPath = resolvedCloudflaredExecutablePath()
+        guard FileManager.default.fileExists(atPath: execPath) else {
+            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared bulunamadı: \(execPath)"]))); return
         }
         guard !hostname.isEmpty && hostname.contains(".") && hostname.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
              completion(.failure(NSError(domain: "InputError", code: 13, userInfo: [NSLocalizedDescriptionKey: "Geçersiz hostname formatı."])))
@@ -895,7 +999,7 @@ class TunnelManager: ObservableObject {
         let tunnelIdentifier = tunnelInfo.uuidFromConfig ?? tunnelInfo.name
         print("🔗 DNS yönlendiriliyor: \(tunnelIdentifier) -> \(hostname)...")
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: cloudflaredExecutablePath)
+        process.executableURL = resolvedCloudflaredExecutableURL()
         process.arguments = ["tunnel", "route", "dns", tunnelIdentifier, hostname]
         let outputPipe = Pipe(); let errorPipe = Pipe()
         process.standardOutput = outputPipe; process.standardError = errorPipe
@@ -1005,13 +1109,15 @@ class TunnelManager: ObservableObject {
 
     // MARK: - Cloudflare Login
     func cloudflareLogin(completion: @escaping (Result<Void, Error>) -> Void) {
-        guard FileManager.default.fileExists(atPath: cloudflaredExecutablePath) else {
-            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared bulunamadı."]))); return
+        let execURL = resolvedCloudflaredExecutableURL()
+        let execPath = execURL.path
+        guard FileManager.default.fileExists(atPath: execPath) else {
+            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared bulunamadı: \(execPath)"]))); return
         }
         print("🔑 Cloudflare girişi başlatılıyor (Tarayıcı açılacak)...")
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: cloudflaredExecutablePath)
+        process.executableURL = execURL
         process.arguments = ["login"]
         let outputPipe = Pipe(); let errorPipe = Pipe()
         process.standardOutput = outputPipe; process.standardError = errorPipe
@@ -1050,8 +1156,10 @@ class TunnelManager: ObservableObject {
 
      // MARK: - Quick Tunnel Management (Revised URL Detection)
     func startQuickTunnel(localURL: String, completion: @escaping (Result<UUID, Error>) -> Void) {
-        guard FileManager.default.fileExists(atPath: cloudflaredExecutablePath) else {
-            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared bulunamadı: \(cloudflaredExecutablePath)"]))); return
+        let execURL = resolvedCloudflaredExecutableURL()
+        let execPath = execURL.path
+        guard FileManager.default.fileExists(atPath: execPath) else {
+            completion(.failure(NSError(domain: "CloudflaredManagerError", code: 1, userInfo: [NSLocalizedDescriptionKey: "cloudflared bulunamadı: \(execPath)"]))); return
         }
         guard let url = URL(string: localURL), url.scheme != nil, url.host != nil else {
             completion(.failure(NSError(domain: "InputError", code: 10, userInfo: [NSLocalizedDescriptionKey: "Geçersiz yerel URL formatı. (örn: http://localhost:8000)"]))); return
@@ -1061,11 +1169,13 @@ class TunnelManager: ObservableObject {
         let process = Process()
         let tunnelID = UUID()
 
-        process.executableURL = URL(fileURLWithPath: cloudflaredExecutablePath)
+        process.executableURL = execURL
+        process.currentDirectoryURL = URL(fileURLWithPath: cloudflaredDirectoryPath)
+        process.environment = ProcessInfo.processInfo.environment
         // Yeni cloudflared versiyonları için güncellenmiş argümanlar
         process.arguments = ["tunnel", "--url", localURL, "--no-autoupdate"]
         
-        print("   🔧 Cloudflared komutu: \(cloudflaredExecutablePath) \(process.arguments?.joined(separator: " ") ?? "")")
+        print("   🔧 Cloudflared komutu: \(execPath) \(process.arguments?.joined(separator: " ") ?? "")")
 
         let outputPipe = Pipe()
         let errorPipe = Pipe()

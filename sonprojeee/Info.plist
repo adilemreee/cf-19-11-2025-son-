@@ -2,19 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>LSUIElement</key>
-	<true/>
-	<key>CFBundleName</key>
-	<string>sonprojeee</string>
-	<key>CFBundleDisplayName</key>
-	<string>Cloudflared Manager</string>
-	<key>CFBundleIdentifier</key>
-	<string>adilemre.sonprojeee</string>
-	<key>CFBundleVersion</key>
-	<string>1.0</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.4</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Bu uygulama tunnel yönetimi için sistem komutları çalıştırmalıdır.</string>
+	<key>NSSystemAdministrationUsageDescription</key>
+	<string>Cloudflared ve MAMP gibi servisleri yönetmek için sistem izinleri gereklidir.</string>
+	<key>LSUIElement</key>
+	<false/>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
 </dict>
 </plist>

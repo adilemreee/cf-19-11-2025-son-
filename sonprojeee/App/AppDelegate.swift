@@ -213,6 +213,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
             // Çalışma dizinini ayarla (çok önemli)
             process.currentDirectoryURL = URL(fileURLWithPath: expandedProjectDirPath)
+            process.environment = ProcessInfo.processInfo.environment
 
             // Termination Handler (içerik aynı, sadece log mesajını güncelleyebiliriz)
             process.terminationHandler = { terminatedProcess in
@@ -730,6 +731,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/sh") // Betiği shell ile çalıştır
             process.arguments = [scriptPath]
+            process.environment = ProcessInfo.processInfo.environment
+            process.currentDirectoryURL = URL(fileURLWithPath: self.mampBinPath)
 
             // Çıktıyı yakalamak istersen (debugging için yararlı olabilir):
             // let outputPipe = Pipe()
